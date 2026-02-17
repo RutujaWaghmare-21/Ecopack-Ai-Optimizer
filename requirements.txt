@@ -4,3 +4,5 @@ scikit-learn
 xgboost
 plotly
 gunicorn
+transformers
+torch
