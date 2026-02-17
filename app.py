@@ -14,20 +14,8 @@ import json
 app = Flask(__name__)
 
 # ==========================================
-# 1. SETUP AI & LOGGING
+# 1. SETUP LOGGING & GLOBAL VARS
 # ==========================================
-print("⏳ Loading Zero-Shot Classification AI...")
-try:
-    classifier = pipeline(
-        "zero-shot-classification",
-        model="valhalla/distilbart-mnli-12-1"
-    )
-    print("✅ AI Brain Loaded!")
-except Exception as e:
-    print(f"❌ AI Load Warning: {e}")
-    def classifier(text, labels):
-        return {'labels': ['General Use']}
-
 LOG_FILE = 'usage_logs.csv'
 if not os.path.exists(LOG_FILE):
     with open(LOG_FILE, mode='w', newline='') as file:
@@ -36,6 +24,26 @@ if not os.path.exists(LOG_FILE):
             'Timestamp', 'Item', 'Category',
             'Distance', 'Cost_Saved', 'CO2_Saved', 'Standard_CO2'
         ])
+
+# Global variable for the AI model (Lazy Loading)
+classifier_model = None
+
+def get_classifier():
+    """Loads the AI model only when needed to prevent Render timeouts."""
+    global classifier_model
+    if classifier_model is None:
+        print("⏳ Loading Zero-Shot Classification AI...")
+        try:
+            classifier_model = pipeline(
+                "zero-shot-classification",
+                model="valhalla/distilbart-mnli-12-1"
+            )
+            print("✅ AI Brain Loaded!")
+        except Exception as e:
+            print(f"❌ AI Load Warning: {e}")
+            # Fallback dummy function if AI fails
+            return lambda text, labels: {'labels': ['General Use']}
+    return classifier_model
 
 # ==========================================
 # 2. LOAD DATABASE & MODELS
@@ -57,15 +65,20 @@ try:
     df['Category'] = df['Category'].astype(str).str.strip()
     df['Material'] = df['Material'].astype(str).str.strip()
 
-    model_cost = joblib.load('model_cost_rf.pkl')
-    model_co2 = joblib.load('model_co2_xgb.pkl')
+    # NOTE: You are loading these but currently using direct calculation logic below.
+    # This is fine for a hackathon (safer), but keep the files in the repo.
+    try:
+        model_cost = joblib.load('model_cost_rf.pkl')
+        model_co2 = joblib.load('model_co2_xgb.pkl')
+    except:
+        print("⚠️ Warning: ML .pkl files not found. Using direct calculation logic.")
 
     print("✅ System Ready.")
 
 except Exception as e:
     print("❌ Critical Error loading data/models")
     traceback.print_exc()
-    sys.exit()
+    # Don't exit here, let the app start even if data fails (easier to debug on Render)
 
 # ==========================================
 # 3. HELPER FUNCTIONS
@@ -77,6 +90,7 @@ def guess_category(user_input):
         "Fashion & Luxury", "Chemicals & Hazmat", "Office & Stationery"
     ]
     try:
+        classifier = get_classifier() # Load AI here
         result = classifier(user_input, labels)
         return result['labels'][0]
     except:
@@ -88,40 +102,49 @@ def guess_category(user_input):
 @app.route('/dashboard')
 def dashboard():
     if not os.path.exists(LOG_FILE) or os.stat(LOG_FILE).st_size == 0:
-        return "No data available yet."
+        return "No data available yet. Please use the app to generate data."
 
-    data = pd.read_csv(LOG_FILE)
+    try:
+        data = pd.read_csv(LOG_FILE)
+        
+        # Check if data is empty
+        if data.empty:
+            return "Log file exists but is empty."
 
-    total_cost_saved = round(data['Cost_Saved'].sum(), 2)
-    total_co2_saved = round(data['CO2_Saved'].sum(), 2)
-    total_std_co2 = data['Standard_CO2'].sum()
+        total_cost_saved = round(data['Cost_Saved'].sum(), 2)
+        total_co2_saved = round(data['CO2_Saved'].sum(), 2)
+        total_std_co2 = data['Standard_CO2'].sum()
 
-    pct = round((total_co2_saved / total_std_co2) * 100, 1) if total_std_co2 > 0 else 0
+        pct = round((total_co2_saved / total_std_co2) * 100, 1) if total_std_co2 > 0 else 0
 
-    fig_pie = px.pie(
-        data, names='Category',
-        title='Material Usage by Category'
-    )
-    graph_pie = json.dumps(fig_pie, cls=plotly.utils.PlotlyJSONEncoder)
+        fig_pie = px.pie(
+            data, names='Category',
+            title='Material Usage by Category'
+        )
+        graph_pie = json.dumps(fig_pie, cls=plotly.utils.PlotlyJSONEncoder)
 
-    fig_line = px.line(
-        data, x='Timestamp', y='Cost_Saved',
-        title='Cumulative Cost Savings (₹)', markers=True
-    )
-    graph_line = json.dumps(fig_line, cls=plotly.utils.PlotlyJSONEncoder)
+        fig_line = px.line(
+            data, x='Timestamp', y='Cost_Saved',
+            title='Cumulative Cost Savings (₹)', markers=True
+        )
+        graph_line = json.dumps(fig_line, cls=plotly.utils.PlotlyJSONEncoder)
 
-    return render_template(
-        'dashboard.html',
-        cost=total_cost_saved,
-        co2=total_co2_saved,
-        pct=pct,
-        graph_pie=graph_pie,
-        graph_line=graph_line
-    )
+        return render_template(
+            'dashboard.html',
+            cost=total_cost_saved,
+            co2=total_co2_saved,
+            pct=pct,
+            graph_pie=graph_pie,
+            graph_line=graph_line
+        )
+    except Exception as e:
+        return f"Dashboard Error: {str(e)}"
 
 @app.route('/download_report')
 def download_report():
-    return send_file(LOG_FILE, as_attachment=True)
+    if os.path.exists(LOG_FILE):
+        return send_file(LOG_FILE, as_attachment=True)
+    return "No report available."
 
 # ==========================================
 # 5. MAIN APP ROUTES
@@ -130,7 +153,6 @@ def download_report():
 def home():
     return render_template('index.html')
 
-@app.route('/predict', methods=['POST'])
 @app.route('/predict', methods=['POST'])
 def predict():
     try:
@@ -146,19 +168,21 @@ def predict():
         # 3. Filter Data by Category
         category_data = df[df['Category'] == category].copy()
         if category_data.empty:
-            category_data = df.copy() # Fallback to all materials if category not found
+            category_data = df.copy() # Fallback to all materials
 
-        # 4. Feature Engineering (For logging)
+        # 4. Feature Engineering
         category_data['Weight_kg'] = weight
         category_data['Distance_km'] = distance
-        # Calculate Base Cost & CO2 (Weight * Cost per kg)
-        # Note: We use 'Cost' instead of 'Cost_per_kg' because we renamed it in Step 2
+        
+        # Calculate Base Cost & CO2
         category_data['Base_Cost'] = category_data['Cost'] * weight
         category_data['Base_CO2'] = category_data['CO2_Emissions_kg'] * weight
-        # Add Shipping Impact (Approximation: 10% cost increase per 500km)
+        
+        # Add Shipping Impact
         distance_factor = distance / 500.0
         shipping_cost = category_data['Base_Cost'] * 0.10 * distance_factor
         shipping_co2 = category_data['Base_CO2'] * 0.15 * distance_factor
+        
         category_data['Final_Cost'] = category_data['Base_Cost'] + shipping_cost
         category_data['Final_CO2'] = category_data['Base_CO2'] + shipping_co2
 
@@ -184,6 +208,9 @@ def predict():
 
         # 8. Ranking & Selection
         ranked = category_data.sort_values(by='Final_CO2')
+        if ranked.empty:
+             return jsonify({'error': 'No matching materials found'}), 400
+             
         best = ranked.iloc[0]
 
         # 9. Savings Calculation
@@ -241,9 +268,10 @@ def predict():
 # 6. RUN SERVER
 # ==========================================
 if __name__ == '__main__': 
-    
     if not os.path.exists('templates'):
         print("⚠️ Warning: 'templates' folder is missing. Dashboard will not work.")
     
-    print("🚀 Server starting on http://127.0.0.1:5000")
-    app.run(debug=True)
+    # Use PORT environment variable for Render
+    port = int(os.environ.get("PORT", 5000))
+    print(f"🚀 Server starting on port {port}")
+    app.run(host='0.0.0.0', port=port, debug=False) # Debug False for production
