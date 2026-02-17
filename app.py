@@ -267,11 +267,15 @@ def predict():
 # ==========================================
 # 6. RUN SERVER
 # ==========================================
-if __name__ == '__main__': 
-    if not os.path.exists('templates'):
-        print("⚠️ Warning: 'templates' folder is missing. Dashboard will not work.")
+if __name__ == '__main__':
+    from waitress import serve
     
-    # Use PORT environment variable for Render
-    port = int(os.environ.get("PORT", 5000))
-    print(f"🚀 Server starting on port {port}")
-    app.run(host='0.0.0.0', port=port, debug=False) # Debug False for production
+    # Render assigns a port in the environment variable 'PORT'
+    # If it's not found, it defaults to 10000 (Render's default)
+    port = int(os.environ.get("PORT", 10000))
+    
+    print(f"🚀 Server starting on port {port} using Waitress...")
+    
+    # This is the line that fixes the "No Open Ports" error
+    serve(app, host="0.0.0.0", port=port)
+
