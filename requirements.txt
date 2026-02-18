@@ -1,8 +1,6 @@
 flask
 pandas
-scikit-learn
-xgboost
+joblib
 plotly
-transformers
-torch
-waitress
+gunicorn
+
