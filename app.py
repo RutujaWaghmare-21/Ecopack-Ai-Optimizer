@@ -62,56 +62,71 @@ def dashboard():
     if not os.path.exists(LOG_FILE) or os.stat(LOG_FILE).st_size == 0:
         return "No data available yet."
 
-    data = pd.read_csv(LOG_FILE)
+    try:
+        data = pd.read_csv(LOG_FILE)
+        
+        # FIX TIME DATA CRASH
+        data['Timestamp'] = pd.to_datetime(data['Timestamp'], format='mixed', errors='coerce')
+        data = data.dropna(subset=['Timestamp'])
+        data = data.sort_values(by='Timestamp') 
 
-    total_cost_saved = round(data['Cost_Saved'].sum(), 2)
-    total_co2_saved = round(data['CO2_Saved'].sum(), 2)
-    total_std_co2 = data['Standard_CO2'].sum()
+        total_cost_saved = round(data['Cost_Saved'].sum(), 2)
+        total_co2_saved = round(data['CO2_Saved'].sum(), 2)
+        total_std_co2 = data['Standard_CO2'].sum()
 
-    pct = round((total_co2_saved / total_std_co2) * 100, 1) if total_std_co2 > 0 else 0
+        # Calculate Percentage
+        pct = round((total_co2_saved / total_std_co2) * 100, 1) if total_std_co2 > 0 else 0
 
-    fig_pie = px.pie(
-        data, names='Category',
-        title='Material Usage by Category'
-    )
-    graph_pie = json.dumps(fig_pie, cls=plotly.utils.PlotlyJSONEncoder)
+        # Graph 1: Pie Chart
+        fig_pie = px.pie(
+            data, names='Category',
+            title='Material Usage by Category',
+            color_discrete_sequence=px.colors.sequential.RdBu
+        )
+        graph_pie = json.dumps(fig_pie, cls=plotly.utils.PlotlyJSONEncoder)
 
-    fig_line = px.line(
-        data, x='Timestamp', y='Cost_Saved',
-        title='Cumulative Cost Savings (₹)', markers=True
-    )
-    graph_line = json.dumps(fig_line, cls=plotly.utils.PlotlyJSONEncoder)
+        # Graph 2: Line Chart
+        fig_line = px.line(
+            data, x='Timestamp', y='Cost_Saved',
+            title='Cumulative Cost Savings (₹)', markers=True,
+            color_discrete_sequence=['#00b894']
+        )
+        graph_line = json.dumps(fig_line, cls=plotly.utils.PlotlyJSONEncoder)
 
-    return render_template(
-        'dashboard.html',
-        cost=total_cost_saved,
-        co2=total_co2_saved,
-        pct=pct,
-        graph_pie=graph_pie,
-        graph_line=graph_line
-    )
+        return render_template(
+            'dashboard.html',
+            cost=total_cost_saved,
+            co2=total_co2_saved,
+            pct=pct,
+            graph_pie=graph_pie,
+            graph_line=graph_line
+        )
+    except Exception as e:
+        traceback.print_exc()
+        return f"Dashboard Error: {str(e)}"
 
 @app.route('/download_report')
 def download_report():
-    return send_file(LOG_FILE, as_attachment=True)
-    
+    if os.path.exists(LOG_FILE):
+        return send_file(LOG_FILE, as_attachment=True)
+    return "No report available."
+
 @app.route('/predict', methods=['POST'])
 def predict():
     try:
-        # 1. Receive Data (Category comes directly from user now)
+        # 1. Receive Data
         data = request.get_json()
         item_name = data.get('item_name', 'Unknown')
-        category = data.get('category', 'General Use') # <--- DROPDOWN VALUE
+        category = data.get('category', 'General Use')
         weight = float(data.get('weight', 1))
         distance = float(data.get('distance', 500))
 
         # 2. Filter Data
         category_data = df[df['Category'] == category].copy()
         if category_data.empty:
-            # Fallback: Use the whole dataset if category doesn't match
             category_data = df.copy()
 
-        # 3. Calculations (Math Logic)
+        # 3. Calculations
         category_data['Weight_kg'] = weight
         category_data['Base_Cost'] = category_data['Cost'] * weight
         category_data['Base_CO2'] = category_data['CO2_Emissions_kg'] * weight
@@ -175,9 +190,13 @@ def predict():
 # 4. RUN SERVER
 # ==========================================
 if __name__ == '__main__':
+    # Get the port from Render, or use 5000 for local testing
     port = int(os.environ.get("PORT", 5000))
-        if os.environ.get("RENDER"):
+    
+    # Check if we are on Render (Render sets 'RENDER' env var)
+    if os.environ.get("RENDER"):
+        # PRODUCTION: Turn off debug, listen on 0.0.0.0
         app.run(host='0.0.0.0', port=port, debug=False)
     else:
+        # LOCAL: Keep debug on for easier testing
         app.run(debug=True)
-    
